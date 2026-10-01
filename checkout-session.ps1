@@ -4,9 +4,9 @@
 # 1. If the last candidate left uncommitted changes, commit and push that branch.
 # 2. Clean the workspace.
 # 3. Check out scenario-a, scenario-b, scenario-c, or scenario-d from origin.
-# 4. Create and check out a new uppercase branch: 4-character slot id, scenario,
-#    then time, for example A002-D-101010. The slot id is unique, including the
-#    combination A002-D. If that combo already exists, ask for a different slot id.
+# 4. Create and check out a new uppercase branch: 4-character slot id, then time,
+#    for example A002-101010. The slot id is unique. If a branch for that slot
+#    already exists, ask for a different slot id.
 #
 # Double-click checkout-session.cmd and enter the scenario and the slot id.
 # Remote stays origin. The slot id does not have to start with the scenario letter.
@@ -21,7 +21,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Problem,
 
-    [Parameter(Mandatory = $true, Position = 1, HelpMessage = "Slot id, exactly 4 characters, for example B201. The branch becomes B201-C-101010.")]
+    [Parameter(Mandatory = $true, Position = 1, HelpMessage = "Slot id, exactly 4 characters, for example A002. The branch becomes A002-101010.")]
     [ValidateNotNullOrEmpty()]
     [string]$SlotId,
 
@@ -78,7 +78,6 @@ function Get-SlotBranchName {
 function Get-ExistingSlotBranches {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$ProblemLetter,
         [Parameter(Mandatory = $true)][string]$RemoteName
     )
 
@@ -89,20 +88,18 @@ function Get-ExistingSlotBranches {
 
     $slot = [regex]::Escape($Id)
     $remote = [regex]::Escape($RemoteName)
-    $pattern = "(?i)^(?:$remote/)?$slot-(?:[a-z](?:-\d{6})?|\d{6})$"
+    $pattern = "(?i)^(?:$remote/)?$slot(?:-[a-z])?(?:-\d{6})?$"
     return @($refs | Where-Object { $_ -match $pattern } | ForEach-Object { $_ -replace "^$remote/", "" } | Select-Object -Unique)
 }
 
 function Read-AvailableSlotId {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$ProblemLetter,
         [Parameter(Mandatory = $true)][string]$RemoteName
     )
 
     $slotIdName = $null
     $pending = $Id
-    $combo = "$($ProblemLetter.ToUpperInvariant())"
     while ($true) {
         if (-not [string]::IsNullOrWhiteSpace($pending)) {
             try {
@@ -116,13 +113,13 @@ function Read-AvailableSlotId {
 
         $pending = $null
         if ($slotIdName) {
-            $existing = @(Get-ExistingSlotBranches -Id $slotIdName -ProblemLetter $ProblemLetter -RemoteName $RemoteName)
+            $existing = @(Get-ExistingSlotBranches -Id $slotIdName -RemoteName $RemoteName)
             if ($existing.Count -eq 0) {
                 return $slotIdName
             }
 
             $list = $existing -join ", "
-            Write-Host "Branch $list already exists. $slotIdName-$combo cannot be used again."
+            Write-Host "Branch $list already exists. Slot id $slotIdName cannot be used again."
             Write-Host "Please enter a proper slot id."
         }
 
@@ -139,14 +136,12 @@ function Read-AvailableSlotId {
 function Get-UniqueSlotBranchName {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$ProblemLetter,
         [Parameter(Mandatory = $true)][string]$RemoteName
     )
 
-    $availableId = Read-AvailableSlotId -Id $Id -ProblemLetter $ProblemLetter -RemoteName $RemoteName
+    $availableId = Read-AvailableSlotId -Id $Id -RemoteName $RemoteName
     $stamp = Get-Date -Format "HHmmss"
-    $scenario = $ProblemLetter.ToUpperInvariant()
-    return "$availableId-$scenario-$stamp"
+    return "$availableId-$stamp"
 }
 
 function Save-LastCandidateWork {
@@ -334,7 +329,7 @@ try {
 
     Write-Host "Fetching $Remote"
     Invoke-Git @("fetch", $Remote, "--prune")
-    $slotIdName = Read-AvailableSlotId -Id $SlotId -ProblemLetter $problemLetter -RemoteName $Remote
+    $slotIdName = Read-AvailableSlotId -Id $SlotId -RemoteName $Remote
     Write-Host "Slot id: $slotIdName"
 
     Save-LastCandidateWork -RemoteName $Remote
@@ -372,7 +367,7 @@ try {
     Invoke-Git @("checkout", "-B", $Branch, "$Remote/$Branch")
     Invoke-Git @("branch", "--set-upstream-to=$Remote/$Branch", $Branch)
 
-    $slotBranch = Get-UniqueSlotBranchName -Id $slotIdName -ProblemLetter $problemLetter -RemoteName $Remote
+    $slotBranch = Get-UniqueSlotBranchName -Id $slotIdName -RemoteName $Remote
     Write-Host "Creating branch $slotBranch"
     Invoke-Git @("checkout", "-b", $slotBranch)
 

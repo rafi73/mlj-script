@@ -25,7 +25,7 @@ if "%SLOTID%"=="" (
 
 echo.
 echo Scenario: scenario-%SCENARIO% from origin
-echo The slot id is unique and must be 4 characters. The branch will be uppercase, for example A002-D-101010.
+echo The slot id is unique and must be 4 characters. The branch will be uppercase, for example A002-101010.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0checkout-session.ps1" -Problem "%SCENARIO%" -SlotId "%SLOTID%"
 echo.
