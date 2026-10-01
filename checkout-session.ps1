@@ -1,10 +1,19 @@
-# Checks out a scenario branch from a problem letter, then creates a working branch
-# named for the slot id. Local changes, untracked files, and project build caches
-# are removed first.
+# Prepares coding-session for the next interview.
+# This script stays in mlj-script. Git commands always run in the coding-session repo.
+#
+# 1. If the last candidate left uncommitted changes, commit and push that branch.
+# 2. Clean the workspace.
+# 3. Check out scenario-a, scenario-b, scenario-c, or scenario-d from origin.
+# 4. Create and check out a new uppercase branch: 4-character slot id, scenario,
+#    then time, for example A002-D-101010. The slot id is unique, including the
+#    combination A002-D. If that combo already exists, ask for a different slot id.
+#
+# Double-click checkout-session.cmd and enter the scenario and the slot id.
+# Remote stays origin. The slot id does not have to start with the scenario letter.
 #
 # Usage:
-#   .\checkout-session.ps1 -Problem a -SlotId A110
-#   .\checkout-session.ps1 b B110 -Remote origin
+#   .\checkout-session.ps1 -Problem d -SlotId B001
+#   .\checkout-session.cmd
 
 [CmdletBinding()]
 param(
@@ -12,7 +21,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Problem,
 
-    [Parameter(Mandatory = $true, Position = 1, HelpMessage = "Slot id, for example A110 or B110")]
+    [Parameter(Mandatory = $true, Position = 1, HelpMessage = "Slot id, exactly 4 characters, for example B201. The branch becomes B201-C-101010.")]
     [ValidateNotNullOrEmpty()]
     [string]$SlotId,
 
@@ -21,6 +30,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$CodingSessionRoot = "C:\Users\Admin\Documents\GitHub\coding-session"
 
 function Invoke-Git {
     param(
@@ -45,24 +56,15 @@ function Get-ProblemLetter {
         return $value
     }
 
-    throw "Problem statement must be a letter such as 'a' or 'b'. Got '$ProblemStatement'."
+    throw "Scenario must be a letter such as 'a', 'b', 'c', or 'd'. Got '$ProblemStatement'."
 }
 
 function Get-SlotBranchName {
-    param(
-        [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$ProblemLetter
-    )
+    param([Parameter(Mandatory = $true)][string]$Id)
 
-    $name = $Id.Trim()
-    if ($name -notmatch '^[A-Za-z][A-Za-z0-9]+$') {
-        throw "Slot id must look like 'A110' or 'B110'. Got '$Id'."
-    }
-
-    $slotLetter = $name.Substring(0, 1).ToLowerInvariant()
-    if ($slotLetter -ne $ProblemLetter) {
-        $expected = $ProblemLetter.ToUpperInvariant()
-        throw "Slot id '$name' does not match problem '$ProblemLetter'. Expected an id starting with '$expected', for example ${expected}110."
+    $name = $Id.Trim().ToUpperInvariant()
+    if ($name -notmatch '^[A-Z][A-Z0-9]{3}$') {
+        throw "Slot id must be exactly 4 characters, for example 'A110' or 'B201'. Got '$Id'."
     }
 
     & git check-ref-format "refs/heads/$name" | Out-Null
@@ -73,14 +75,195 @@ function Get-SlotBranchName {
     return $name
 }
 
+function Get-ExistingSlotBranches {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string]$ProblemLetter,
+        [Parameter(Mandatory = $true)][string]$RemoteName
+    )
+
+    $refs = & git for-each-ref --format="%(refname:short)" "refs/heads" "refs/remotes/$RemoteName"
+    if ($LASTEXITCODE -ne 0) {
+        throw "git for-each-ref failed with exit code $LASTEXITCODE."
+    }
+
+    $slot = [regex]::Escape($Id)
+    $remote = [regex]::Escape($RemoteName)
+    $pattern = "(?i)^(?:$remote/)?$slot-(?:[a-z](?:-\d{6})?|\d{6})$"
+    return @($refs | Where-Object { $_ -match $pattern } | ForEach-Object { $_ -replace "^$remote/", "" } | Select-Object -Unique)
+}
+
+function Read-AvailableSlotId {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string]$ProblemLetter,
+        [Parameter(Mandatory = $true)][string]$RemoteName
+    )
+
+    $slotIdName = $null
+    $pending = $Id
+    $combo = "$($ProblemLetter.ToUpperInvariant())"
+    while ($true) {
+        if (-not [string]::IsNullOrWhiteSpace($pending)) {
+            try {
+                $slotIdName = Get-SlotBranchName -Id $pending
+            }
+            catch {
+                Write-Host $_.Exception.Message
+                $slotIdName = $null
+            }
+        }
+
+        $pending = $null
+        if ($slotIdName) {
+            $existing = @(Get-ExistingSlotBranches -Id $slotIdName -ProblemLetter $ProblemLetter -RemoteName $RemoteName)
+            if ($existing.Count -eq 0) {
+                return $slotIdName
+            }
+
+            $list = $existing -join ", "
+            Write-Host "Branch $list already exists. $slotIdName-$combo cannot be used again."
+            Write-Host "Please enter a proper slot id."
+        }
+
+        $entered = Read-Host "Slot id (exactly 4 characters, for example A002)"
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            Write-Host "Slot id is required."
+            continue
+        }
+
+        $pending = $entered
+    }
+}
+
+function Get-UniqueSlotBranchName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string]$ProblemLetter,
+        [Parameter(Mandatory = $true)][string]$RemoteName
+    )
+
+    $availableId = Read-AvailableSlotId -Id $Id -ProblemLetter $ProblemLetter -RemoteName $RemoteName
+    $stamp = Get-Date -Format "HHmmss"
+    $scenario = $ProblemLetter.ToUpperInvariant()
+    return "$availableId-$scenario-$stamp"
+}
+
+function Save-LastCandidateWork {
+    param([Parameter(Mandatory = $true)][string]$RemoteName)
+
+    $branch = & git symbolic-ref --short HEAD 2>$null
+    $onBranch = $LASTEXITCODE -eq 0
+
+    $changes = & git status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        throw "git status failed with exit code $LASTEXITCODE."
+    }
+
+    if (-not $changes) {
+        Write-Host "No uncommitted changes to save."
+        return
+    }
+
+    if (-not $onBranch) {
+        throw "There are uncommitted changes, but HEAD is detached. Commit them on a branch before continuing."
+    }
+
+    Write-Host "Committing uncommitted changes on $branch."
+    Invoke-Git @("add", "-A")
+    Invoke-Git @("commit", "-m", "Save candidate work")
+    Write-Host "Pushing $branch to $RemoteName."
+    Invoke-Git @("push", "-u", $RemoteName, "HEAD")
+}
+
 function Remove-DirectoryIfPresent {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
     $fullPath = Join-Path (Get-Location) $RelativePath
-    if (Test-Path -LiteralPath $fullPath) {
-        Write-Host "Removing $RelativePath"
-        Remove-Item -LiteralPath $fullPath -Recurse -Force
+    if (-not (Test-Path -LiteralPath $fullPath)) {
+        return
     }
+
+    Write-Host "Removing $RelativePath"
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $fullPath -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -eq 5) {
+                throw
+            }
+            Start-Sleep -Seconds 1
+        }
+    }
+}
+
+function Test-TextContainsPath {
+    param(
+        [string]$Text,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    if (-not $Text) {
+        return $false
+    }
+
+    $normalized = $Text.Replace('/', '\')
+    while ($normalized.Contains('\\')) {
+        $normalized = $normalized.Replace('\\', '\')
+    }
+
+    return $normalized.IndexOf($Root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Test-ProcessUsesRepo {
+    param(
+        $Process,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    if (Test-TextContainsPath -Text $Process.ExecutablePath -Root $Root) {
+        return $true
+    }
+    if (Test-TextContainsPath -Text $Process.CommandLine -Root $Root) {
+        return $true
+    }
+
+    if ($Process.CommandLine -match '@(?<ArgFile>[A-Za-z]:\\[^\s"]+)') {
+        $argFile = $Matches.ArgFile
+        if (Test-Path -LiteralPath $argFile) {
+            $argText = Get-Content -LiteralPath $argFile -Raw -ErrorAction SilentlyContinue
+            if (Test-TextContainsPath -Text $argText -Root $Root) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Stop-RepoDevServers {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $root = ([System.IO.Path]::GetFullPath($RepoRoot)).TrimEnd('\')
+    $names = @("node.exe", "esbuild.exe", "java.exe", "javaw.exe")
+
+    $running = @(Get-CimInstance Win32_Process | Where-Object {
+        $names -contains $_.Name -and (Test-ProcessUsesRepo -Process $_ -Root $root)
+    })
+
+    if ($running.Count -eq 0) {
+        return
+    }
+
+    Write-Host "Stopping dev servers that are locking build files."
+    foreach ($process in $running) {
+        Write-Host "Stopping $($process.Name) ($($process.ProcessId))"
+        & taskkill.exe /F /T /PID $process.ProcessId 2>$null | Out-Null
+    }
+
+    Start-Sleep -Seconds 1
 }
 
 function Clear-ProjectCaches {
@@ -109,7 +292,7 @@ function Stop-InProgressGitOperation {
     }
 
     $gitDir = (Resolve-Path $gitDir).Path
-    if (Test-Path (Join-Path $gitDir "rebase-merge") -or Test-Path (Join-Path $gitDir "rebase-apply")) {
+    if ((Test-Path (Join-Path $gitDir "rebase-merge")) -or (Test-Path (Join-Path $gitDir "rebase-apply"))) {
         Write-Host "Aborting in-progress rebase"
         Invoke-Git @("rebase", "--abort")
     }
@@ -127,48 +310,78 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "git is not on PATH."
 }
 
-$repoRoot = & git rev-parse --show-toplevel
-if ($LASTEXITCODE -ne 0) {
-    throw "Run this script from inside the coding-session repository."
+if (-not (Test-Path -LiteralPath $CodingSessionRoot -PathType Container)) {
+    throw "Coding session folder was not found: $CodingSessionRoot"
 }
 
-Set-Location $repoRoot
+Push-Location -LiteralPath $CodingSessionRoot
+try {
+    $repoRoot = & git rev-parse --show-toplevel
+    if ($LASTEXITCODE -ne 0) {
+        throw "Coding session folder is not a git repository: $CodingSessionRoot"
+    }
 
-Invoke-Git @("remote", "get-url", $Remote) | Out-Null
+    Set-Location $repoRoot
+    $env:GIT_ASK_YESNO = "false"
 
-$problemLetter = Get-ProblemLetter -ProblemStatement $Problem
-$Branch = "scenario-$problemLetter"
-$slotBranch = Get-SlotBranchName -Id $SlotId -ProblemLetter $problemLetter
-$scriptName = Split-Path -Leaf $PSCommandPath
+    Invoke-Git @("remote", "get-url", $Remote) | Out-Null
 
-Write-Host "Repository: $repoRoot"
-Write-Host "Problem: $problemLetter"
-Write-Host "Remote branch: $Remote/$Branch"
-Write-Host "Slot id: $slotBranch"
-Write-Host "Cleaning the workspace and caches before checkout."
+    $problemLetter = Get-ProblemLetter -ProblemStatement $Problem
+    $Branch = "scenario-$problemLetter"
 
-Stop-InProgressGitOperation
-Invoke-Git @("reset", "--hard")
-Invoke-Git @("clean", "-fdx", "-e", $scriptName)
-Clear-ProjectCaches
+    Write-Host "Repository: $repoRoot"
+    Write-Host "Scenario: $Branch"
 
-Write-Host "Fetching $Remote"
-Invoke-Git @("fetch", $Remote, "--prune")
+    Write-Host "Fetching $Remote"
+    Invoke-Git @("fetch", $Remote, "--prune")
+    $slotIdName = Read-AvailableSlotId -Id $SlotId -ProblemLetter $problemLetter -RemoteName $Remote
+    Write-Host "Slot id: $slotIdName"
 
-& git rev-parse --verify --quiet "refs/remotes/$Remote/$Branch" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Branch '$Branch' was not found on remote '$Remote'."
+    Save-LastCandidateWork -RemoteName $Remote
+
+    Write-Host "Cleaning the workspace for the next candidate."
+    Stop-RepoDevServers -RepoRoot $repoRoot
+    Stop-InProgressGitOperation
+    Invoke-Git @("reset", "--hard")
+    $cleanError = $null
+    foreach ($attempt in 1..5) {
+        & git clean -fdx
+        if ($LASTEXITCODE -eq 0) {
+            $cleanError = $null
+            break
+        }
+
+        $cleanError = "git clean -fdx failed with exit code $LASTEXITCODE."
+        Stop-RepoDevServers -RepoRoot $repoRoot
+        Start-Sleep -Seconds 1
+    }
+    if ($cleanError) {
+        throw $cleanError
+    }
+    Clear-ProjectCaches
+
+    Write-Host "Fetching $Remote"
+    Invoke-Git @("fetch", $Remote, "--prune")
+
+    & git rev-parse --verify --quiet "refs/remotes/$Remote/$Branch" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Branch '$Branch' was not found on remote '$Remote'."
+    }
+
+    Write-Host "Checking out $Remote/$Branch"
+    Invoke-Git @("checkout", "-B", $Branch, "$Remote/$Branch")
+    Invoke-Git @("branch", "--set-upstream-to=$Remote/$Branch", $Branch)
+
+    $slotBranch = Get-UniqueSlotBranchName -Id $slotIdName -ProblemLetter $problemLetter -RemoteName $Remote
+    Write-Host "Creating branch $slotBranch"
+    Invoke-Git @("checkout", "-b", $slotBranch)
+
+    Write-Host ""
+    Write-Host "Ready for the next interview."
+    Write-Host "  Scenario $Branch checked out from $Remote/$Branch"
+    Write-Host "  Working branch $slotBranch"
+    Invoke-Git @("status", "-sb")
 }
-
-Write-Host "Checking out $Remote/$Branch"
-Invoke-Git @("checkout", "-B", $Branch, "$Remote/$Branch")
-Invoke-Git @("branch", "--set-upstream-to=$Remote/$Branch", $Branch)
-
-Write-Host "Creating $slotBranch"
-Invoke-Git @("checkout", "-B", $slotBranch)
-
-Write-Host ""
-Write-Host "Ready."
-Write-Host "  Problem $problemLetter checked out from $Remote/$Branch"
-Write-Host "  Working branch $slotBranch"
-Invoke-Git @("status", "-sb")
+finally {
+    Pop-Location
+}
