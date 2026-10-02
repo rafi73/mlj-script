@@ -1,29 +1,29 @@
 # Prepares coding-session for the next interview.
 # This script stays in mlj-script. Git commands always run in the coding-session repo.
 #
-# 1. If the last candidate left uncommitted changes, commit and push that branch.
-# 2. Clean the workspace.
-# 3. Check out scenario-a, scenario-b, scenario-c, or scenario-d from origin.
-# 4. Create and check out a new uppercase branch: 4-character slot id, then time,
-#    for example A002-101010. The slot id is unique. If a branch for that slot
-#    already exists, ask for a different slot id.
+# 1. Ask for the slot id and check origin: the 4-character slot id must be unused.
+# 2. Ask for the scenario (a, b, c, or d) and check that scenario-x exists on origin.
+# 3. If the last candidate left uncommitted changes, commit and push that branch.
+# 4. Clean the workspace.
+# 5. Check out the scenario branch from origin.
+# 6. Create and check out a new uppercase branch: slot id, then time,
+#    for example A002-101010.
 #
-# Double-click checkout-session.cmd and enter the scenario and the slot id.
+# Double-click checkout-session.cmd. It asks for the slot id first, then the scenario.
 # Remote stays origin. The slot id does not have to start with the scenario letter.
 #
 # Usage:
-#   .\checkout-session.ps1 -Problem d -SlotId B001
+#   .\checkout-session.ps1 -SlotId A002 -Problem d
+#   .\checkout-session.ps1 -SlotId A002        (asks for the scenario)
 #   .\checkout-session.cmd
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0, HelpMessage = "Problem statement letter, for example a or b")]
-    [ValidateNotNullOrEmpty()]
-    [string]$Problem,
-
-    [Parameter(Mandatory = $true, Position = 1, HelpMessage = "Slot id, exactly 4 characters, for example A002. The branch becomes A002-101010.")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(Position = 0, HelpMessage = "Slot id, exactly 4 characters, for example A002. The branch becomes A002-101010.")]
     [string]$SlotId,
+
+    [Parameter(Position = 1, HelpMessage = "Scenario letter, for example a or b")]
+    [string]$Problem,
 
     [string]$Remote = "origin"
 )
@@ -94,7 +94,7 @@ function Get-ExistingSlotBranches {
 
 function Read-AvailableSlotId {
     param(
-        [Parameter(Mandatory = $true)][string]$Id,
+        [string]$Id,
         [Parameter(Mandatory = $true)][string]$RemoteName
     )
 
@@ -142,6 +142,43 @@ function Get-UniqueSlotBranchName {
     $availableId = Read-AvailableSlotId -Id $Id -RemoteName $RemoteName
     $stamp = Get-Date -Format "HHmmss"
     return "$availableId-$stamp"
+}
+
+function Read-AvailableScenario {
+    param(
+        [string]$Scenario,
+        [Parameter(Mandatory = $true)][string]$RemoteName
+    )
+
+    $pending = $Scenario
+    while ($true) {
+        if ([string]::IsNullOrWhiteSpace($pending)) {
+            $pending = Read-Host "Scenario (a, b, c, or d)"
+            if ([string]::IsNullOrWhiteSpace($pending)) {
+                Write-Host "Scenario is required."
+                continue
+            }
+        }
+
+        $letter = $null
+        try {
+            $letter = Get-ProblemLetter -ProblemStatement $pending
+        }
+        catch {
+            Write-Host $_.Exception.Message
+            $pending = $null
+            continue
+        }
+
+        $scenarioBranch = "scenario-$letter"
+        & git rev-parse --verify --quiet "refs/remotes/$RemoteName/$scenarioBranch" | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            return $letter
+        }
+
+        Write-Host "Branch '$scenarioBranch' was not found on remote '$RemoteName'. Please enter a proper scenario."
+        $pending = $null
+    }
 }
 
 function Save-LastCandidateWork {
@@ -321,16 +358,17 @@ try {
 
     Invoke-Git @("remote", "get-url", $Remote) | Out-Null
 
-    $problemLetter = Get-ProblemLetter -ProblemStatement $Problem
-    $Branch = "scenario-$problemLetter"
-
     Write-Host "Repository: $repoRoot"
-    Write-Host "Scenario: $Branch"
-
     Write-Host "Fetching $Remote"
     Invoke-Git @("fetch", $Remote, "--prune")
+
     $slotIdName = Read-AvailableSlotId -Id $SlotId -RemoteName $Remote
     Write-Host "Slot id: $slotIdName"
+
+    $problemLetter = Read-AvailableScenario -Scenario $Problem -RemoteName $Remote
+    $Branch = "scenario-$problemLetter"
+    Write-Host "Scenario: $Branch"
+    Write-Host ""
 
     Save-LastCandidateWork -RemoteName $Remote
 
@@ -354,14 +392,6 @@ try {
         throw $cleanError
     }
     Clear-ProjectCaches
-
-    Write-Host "Fetching $Remote"
-    Invoke-Git @("fetch", $Remote, "--prune")
-
-    & git rev-parse --verify --quiet "refs/remotes/$Remote/$Branch" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Branch '$Branch' was not found on remote '$Remote'."
-    }
 
     Write-Host "Checking out $Remote/$Branch"
     Invoke-Git @("checkout", "-B", $Branch, "$Remote/$Branch")
